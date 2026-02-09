@@ -1,7 +1,15 @@
--- [Deprecated] Target Tracker
+-- Target Tracker
 --
--- Radar-to-world-position converter with GPS offset
--- compensation and velocity extrapolation.
+-- Converts radar bearing/distance pairs into world-space target
+-- positions with parallax compensation and velocity extrapolation.
+--
+-- The radar and GPS/altimeter sensors are physically mounted at
+-- different locations on the vehicle. Without correction the raw
+-- GPS reading would place the origin at the sensor, not the radar,
+-- introducing a position error that rotates with the vehicle.
+-- This script removes that error by transforming the known sensor
+-- offsets into world space and subtracting them from the GPS fix.
+--
 -- Originally by YAGoOaR.
 
 pgn = property.getNumber
@@ -118,6 +126,7 @@ function RelAxesVecs(forwardHDG, forwardPTCH, rightHDG, rightPTCH)
 	return relAxes
 end
 
+-- Closure-based per-tick differentiator (returns delta each call)
 function deltaVal(initVal, diffMethod)
 	local pVal = initVal
 	return function(val)
@@ -127,6 +136,10 @@ function deltaVal(initVal, diffMethod)
 	end
 end
 
+-- Convert radar bearing angles and front/back distances into a
+-- local-space offset vector. The front and back radar receivers
+-- sit at different positions along the hull, so their distances
+-- form a triangle whose geometry yields the forward component.
 function radarToLocalDeltaVec(x, y, distFront, distBack)
 	hh = sine(x) * distFront
 	hv = sine(y) * distBack
@@ -135,6 +148,10 @@ function radarToLocalDeltaVec(x, y, distFront, distBack)
 	return vecAdd(Vector(hh, l, hv), Vector(0, radarBackOffsetY, 0))
 end
 
+------------------------
+-- Properties
+------------------------
+-- Physical offsets between the GPS/altimeter sensors and the radar
 GPSoffset = Vector(pgn("1"), pgn("2"), pgn("3"))
 ALToffset = Vector(pgn("4"), pgn("5"), pgn("6"))
 radarBackOffsetY = pgn("7")
@@ -143,23 +160,31 @@ deltaTarget = deltaVal(Vector(0, 0, 0), vecSub)
 
 ticksExtr = pgn("ticksExtr")
 
+------------------------
+-- Main loop
+------------------------
 function onTick()
-
+	-- Skip if no radar contact
 	if getNum(30) == 0 and getNum(31) == 0 then return end
-	
+
 	posRaw = Vector(getNum(21), getNum(22), getNum(23))
 	fhdg, fptch, rhdg, rptch = -getNum(24)*pi2, getNum(25)*pi2, -getNum(26)*pi2, getNum(27)*pi2
 	radarX, radarY, distFront, distBack = getNum(28)*pi2, getNum(29)*pi2, getNum(30), getNum(31)
 
 	relAxes = RelAxesVecs(fhdg, fptch, rhdg, rptch)
 
+	-- Parallax compensation: rotate the known GPS and altimeter
+	-- offsets into world space, then subtract them so the origin
+	-- sits at the radar rather than at the sensor locations.
 	GPSGlobalOffset = vecScale(toGlobal(GPSoffset, relAxes), Vector(-1, -1, 0))
 	ALTGlobalOffset = vecScale(toGlobal(GPSoffset, relAxes), Vector(0, 0, -1))
 	pos = vecAdd(vecAdd(posRaw, GPSGlobalOffset), ALTGlobalOffset)
 
+	-- Convert radar bearings to a world-space delta and add to corrected position
 	delta = toGlobal(radarToLocalDeltaVec(radarX, radarY, distFront, distBack), relAxes)
 
 	tgtPos = vecAdd(pos, delta)
+	-- Extrapolate target position forward by velocity * tick delay
 	tgtDelta = deltaTarget(tgtPos)
 	tgtPosExtr = vecAdd(tgtPos, vecScaleN(tgtDelta, ticksExtr))
 
